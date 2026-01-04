@@ -1,0 +1,916 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CPU Context Switching Animation</title>
+  <style>
+    :root{
+      --bg1:#0b1b33; --bg2:#102a4d; --panel:rgba(255,255,255,.08);
+      --text:rgba(255,255,255,.9); --muted:rgba(255,255,255,.65);
+      --cpu:#2b9cff; --procA:#31d07f; --procB:#ffc247; --pcb:#b6c7ff;
+      --accent:#8a7dff;
+    }
+    body{
+      margin:0; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; color:var(--text);
+      background: radial-gradient(1200px 700px at 30% 20%, #173b6a 0%, var(--bg1) 55%, #061225 100%);
+      min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
+    }
+    .wrap{ width:min(1100px, 100%); display:grid; gap:14px; grid-template-columns: 1fr; }
+    .top{
+      display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px;
+      padding:14px 16px; border-radius:16px; background:var(--panel); backdrop-filter: blur(10px);
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+    .title{ display:flex; flex-direction:column; gap:2px; }
+    .title h1{ margin:0; font-size:18px; letter-spacing:.2px; }
+    .title p{ margin:0; color:var(--muted); font-size:13px; }
+    .controls{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    button{
+      background: rgba(255,255,255,.12);
+      color:var(--text);
+      border:1px solid rgba(255,255,255,.18);
+      border-radius:12px;
+      padding:10px 12px;
+      cursor:pointer;
+      font-weight:600;
+    }
+    button:hover{ background: rgba(255,255,255,.18); }
+    .pill{
+      display:flex; align-items:center; gap:10px;
+      padding:10px 12px; border-radius:12px;
+      background: rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.14);
+      color:var(--muted);
+      font-size:13px;
+      user-select:none;
+    }
+    input[type="range"]{ width:170px; }
+    .toggle{
+      display:flex; align-items:center; gap:8px;
+      padding:10px 12px; border-radius:12px;
+      background: rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.14);
+      color:var(--muted);
+      font-size:13px;
+      user-select:none;
+    }
+    .toggle input{ width:18px; height:18px; accent-color: var(--accent); }
+    .canvasCard{
+      border-radius:18px;
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.05));
+      border:1px solid rgba(255,255,255,.16);
+      box-shadow: 0 18px 50px rgba(0,0,0,.35);
+      overflow:hidden;
+    }
+    canvas{ width:100%; height:auto; display:block; }
+    .footer{
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;
+      color:var(--muted); font-size:12px; padding:0 4px;
+    }
+    .legend{ display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .dot{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; }
+    .kbd{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:rgba(255,255,255,.12);
+      border:1px solid rgba(255,255,255,.16); padding:2px 6px; border-radius:8px; color:var(--text);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="title">
+        <h1>CPU Context Switching — Visual Animation (Conceptual)</h1>
+        <p>Timer interrupt → Save A → Select B → Restore B → CPU runs B</p>
+      </div>
+
+      <div class="controls">
+        <button id="playBtn">▶ Play</button>
+        <button id="stepBtn">Step ▷</button>
+        <button id="resetBtn">↺ Reset</button>
+
+        <div class="pill">
+          Speed
+          <input id="speed" type="range" min="0.5" max="2.5" step="0.1" value="1.2" />
+          <span id="speedVal">1.2×</span>
+        </div>
+
+        <label class="toggle" title="Pause automatically at the start of each step for explanation">
+          <input id="autoPause" type="checkbox" checked />
+          Auto-pause
+        </label>
+
+        <label class="toggle" title="Loop the animation when it reaches the last step">
+          <input id="loop" type="checkbox" checked />
+          Loop
+        </label>
+      </div>
+    </div>
+
+    <div class="canvasCard">
+      <canvas id="c" width="1100" height="640"></canvas>
+    </div>
+
+    <div class="footer">
+      <div class="legend">
+        <span><span class="dot" style="background:var(--procA)"></span>Process A</span>
+        <span><span class="dot" style="background:var(--procB)"></span>Process B</span>
+        <span><span class="dot" style="background:var(--cpu)"></span>CPU</span>
+        <span><span class="dot" style="background:var(--pcb)"></span>PCB</span>
+      </div>
+      <div>
+        Shortcuts: <span class="kbd">Space</span> Play/Pause · <span class="kbd">N</span> Step · <span class="kbd">R</span> Reset
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+
+  // UI
+  const playBtn = document.getElementById("playBtn");
+  const stepBtn = document.getElementById("stepBtn");
+  const resetBtn = document.getElementById("resetBtn");
+  const speed = document.getElementById("speed");
+  const speedVal = document.getElementById("speedVal");
+  const autoPause = document.getElementById("autoPause");
+  const loopToggle = document.getElementById("loop");
+
+  // Utility
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const lerp = (a,b,t)=>a+(b-a)*t;
+  const ease = (t)=>t<.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2; // smooth in-out
+  const now = () => performance.now();
+
+  function roundRect(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function glowText(text, x, y, size=18, color="rgba(255,255,255,.92)", glow="rgba(138,125,255,.35)"){
+    ctx.save();
+    ctx.font = `700 ${size}px system-ui,Segoe UI,Roboto,Arial,sans-serif`;
+    ctx.fillStyle = color;
+    ctx.shadowColor = glow;
+    ctx.shadowBlur = 18;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  function label(text, x, y, w, h, fill, stroke, textColor="#0b1b33", bold=true){
+    ctx.save();
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    roundRect(x,y,w,h,14);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = textColor;
+    ctx.font = `${bold?800:700} 16px system-ui,Segoe UI,Roboto,Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, x+w/2, y+h/2);
+    ctx.restore();
+  }
+
+  function chip(x,y,w,h,title,color, glowAlpha=0){
+    ctx.save();
+    // shadow
+    ctx.shadowColor = "rgba(0,0,0,.25)";
+    ctx.shadowBlur = 18;
+    ctx.shadowOffsetY = 8;
+
+    // body
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "rgba(255,255,255,.18)";
+    ctx.lineWidth = 2;
+    roundRect(x,y,w,h,22);
+    ctx.fill(); ctx.stroke();
+
+    // glow outline
+    if(glowAlpha > 0){
+      ctx.shadowColor = "rgba(138,125,255,.55)";
+      ctx.shadowBlur = 22;
+      ctx.shadowOffsetY = 0;
+      ctx.strokeStyle = `rgba(138,125,255,${0.55*glowAlpha})`;
+      ctx.lineWidth = 6;
+      roundRect(x-3,y-3,w+6,h+6,26);
+      ctx.stroke();
+    }
+
+    // pins
+    ctx.shadowColor = "transparent";
+    ctx.fillStyle = "rgba(255,255,255,.18)";
+    const pinCount = 9;
+    for(let i=0;i<pinCount;i++){
+      const px = x + 12 + i*((w-24)/(pinCount-1));
+      ctx.fillRect(px-3, y-10, 6, 10);
+      ctx.fillRect(px-3, y+h, 6, 10);
+    }
+    for(let i=0;i<7;i++){
+      const py = y + 18 + i*((h-36)/6);
+      ctx.fillRect(x-10, py-3, 10, 6);
+      ctx.fillRect(x+w, py-3, 10, 6);
+    }
+
+    // title
+    ctx.fillStyle = "rgba(255,255,255,.92)";
+    ctx.font = "900 18px system-ui,Segoe UI,Roboto,Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(title, x+w/2, y+14);
+
+    // decorative lines
+    ctx.strokeStyle = "rgba(255,255,255,.12)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x+24, y+54);
+    ctx.lineTo(x+w-24, y+54);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function arrow(x1,y1,x2,y2, color="rgba(255,255,255,.6)", width=3, head=10){
+    const ang = Math.atan2(y2-y1, x2-x1);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(x1,y1);
+    ctx.lineTo(x2,y2);
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x2,y2);
+    ctx.lineTo(x2 - head*Math.cos(ang-0.35), y2 - head*Math.sin(ang-0.35));
+    ctx.lineTo(x2 - head*Math.cos(ang+0.35), y2 - head*Math.sin(ang+0.35));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // --- Floating callouts (you asked)
+  function calloutBox(text, x, y, w, alpha=1){
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    ctx.fillStyle = "rgba(0,0,0,.35)";
+    ctx.strokeStyle = "rgba(255,255,255,.22)";
+    ctx.lineWidth = 2;
+    roundRect(x, y, w, 52, 14);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,.90)";
+    ctx.font = "750 14px system-ui,Segoe UI,Roboto,Arial";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+
+    // simple wrap (2 lines max)
+    const words = text.split(" ");
+    let line1 = "", line2 = "";
+    for (const wd of words){
+      const test = (line1 ? line1 + " " : "") + wd;
+      if(ctx.measureText(test).width < w - 20) line1 = test;
+      else line2 = (line2 ? line2 + " " : "") + wd;
+    }
+
+    ctx.fillText(line1, x + 12, y + 18);
+    if(line2) ctx.fillText(line2, x + 12, y + 36);
+    ctx.restore();
+  }
+
+  function calloutPointer(x1,y1,x2,y2, alpha=1, color="rgba(255,255,255,.45)"){
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    arrow(x1,y1,x2,y2,color,3,10);
+    ctx.restore();
+  }
+
+  // Scene layout coordinates
+  const CPU = { x: 120, y: 140, w: 300, h: 270 };
+  const PCB_A = { x: 560, y: 140, w: 240, h: 140 };
+  const PCB_B = { x: 560, y: 330, w: 240, h: 140 };
+  const READY = { x: 840, y: 200, w: 200, h: 220 };
+
+  // Moving "context packet"
+  const packet = { w: 120, h: 44 };
+
+  // Fake register snapshots (believable, changes over time)
+  const state = {
+    A: { PC: 0x1A3F, R1: 0x00C2, SP: 0x7FF0 },
+    B: { PC: 0x09B1, R1: 0x0F10, SP: 0x6FD8 },
+    cpu: { PC: 0x1A3F, R1: 0x00C2, SP: 0x7FF0 } // starts as A
+  };
+
+  function hex(n, width=4){
+    const s = (n >>> 0).toString(16).toUpperCase();
+    return "0x" + s.padStart(width, "0");
+  }
+
+  function tickFakeExecution(proc){
+    // small changes to look alive while "running"
+    const d1 = (Math.random()*12)|0;
+    const d2 = (Math.random()*6)|0;
+    state[proc].PC = (state[proc].PC + 8 + d1) & 0xFFFF;
+    state[proc].R1 = (state[proc].R1 + d2) & 0xFFFF;
+    state[proc].SP = (state[proc].SP + ((Math.random()<0.5)? -2 : 2)) & 0xFFFF;
+  }
+
+  // Steps timeline
+  const steps = [
+    { key:"A_RUN",   name:"A Running",        dur: 1.4 },
+    { key:"INT",     name:"Timer Interrupt",  dur: 1.1 },
+    { key:"SAVE_A",  name:"Save A → PCB-A",   dur: 1.6 },
+    { key:"SEL_B",   name:"Select B",         dur: 1.1 },
+    { key:"REST_B",  name:"Restore B → CPU",  dur: 1.6 },
+    { key:"B_RUN",   name:"B Running",        dur: 1.4 },
+  ];
+
+  let stepIndex = 0;
+  let stepT = 0;        // 0..1 within step
+  let running = false;
+  let last = now();
+
+  function setPlay(statePlay){
+    running = statePlay;
+    playBtn.textContent = running ? "⏸ Pause" : "▶ Play";
+  }
+
+  function reset(){
+    setPlay(false);
+    stepIndex = 0;
+    stepT = 0;
+
+    // reset states
+    state.A = { PC: 0x1A3F, R1: 0x00C2, SP: 0x7FF0 };
+    state.B = { PC: 0x09B1, R1: 0x0F10, SP: 0x6FD8 };
+    state.cpu = { ...state.A };
+  }
+
+  function nextStep(){
+    const atLast = stepIndex === steps.length - 1;
+    if(atLast && !loopToggle.checked){
+      // if no loop, stop at last
+      stepIndex = steps.length - 1;
+      stepT = 0;
+      setPlay(false);
+      return;
+    }
+    stepIndex = (stepIndex + 1) % steps.length;
+    stepT = 0;
+
+    if(autoPause.checked){
+      setPlay(false);
+    }
+  }
+
+  function jumpToStep(i){
+    stepIndex = clamp(i, 0, steps.length - 1);
+    stepT = 0;
+    if(autoPause.checked) setPlay(false);
+  }
+
+  // UI events
+  playBtn.onclick = () => setPlay(!running);
+  stepBtn.onclick = () => nextStep();
+  resetBtn.onclick = () => reset();
+  speed.oninput = () => speedVal.textContent = `${Number(speed.value).toFixed(1)}×`;
+
+  window.addEventListener("keydown", (e) => {
+    if(e.code === "Space"){ e.preventDefault(); playBtn.click(); }
+    if(e.key.toLowerCase() === "n"){ stepBtn.click(); }
+    if(e.key.toLowerCase() === "r"){ resetBtn.click(); }
+  });
+
+  function drawBackground(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // subtle grid
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = "rgba(255,255,255,.08)";
+    for(let x=30; x<canvas.width; x+=40){
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke();
+    }
+    for(let y=30; y<canvas.height; y+=40){
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke();
+    }
+    ctx.restore();
+
+    glowText("CPU Context Switching (Conceptual Animation)", 28, 42, 22);
+
+    // note
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.55)";
+    ctx.font = "600 12px system-ui";
+    ctx.textAlign = "right";
+    ctx.fillText("Educational visualization (not OS-level implementation)", canvas.width-24, 48);
+    ctx.restore();
+  }
+
+  function drawPCB(box, title, subtitle, glowAlpha=0){
+    ctx.save();
+
+    // glow outline
+    if(glowAlpha > 0){
+      ctx.shadowColor = "rgba(182,199,255,.65)";
+      ctx.shadowBlur = 26;
+      ctx.strokeStyle = `rgba(182,199,255,${0.65*glowAlpha})`;
+      ctx.lineWidth = 6;
+      roundRect(box.x-3, box.y-3, box.w+6, box.h+6, 22);
+      ctx.stroke();
+      ctx.shadowColor = "transparent";
+    }
+
+    ctx.fillStyle = "rgba(182,199,255,.12)";
+    ctx.strokeStyle = "rgba(182,199,255,.25)";
+    ctx.lineWidth = 2;
+    roundRect(box.x, box.y, box.w, box.h, 18);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,.88)";
+    ctx.font = "900 16px system-ui";
+    ctx.textAlign = "left";
+    ctx.fillText(title, box.x+16, box.y+28);
+
+    ctx.fillStyle = "rgba(255,255,255,.62)";
+    ctx.font = "600 12px system-ui";
+    ctx.fillText(subtitle, box.x+16, box.y+48);
+
+    // fields
+    const fields = ["PC", "R1", "SP"];
+    for(let i=0;i<fields.length;i++){
+      ctx.fillStyle = "rgba(255,255,255,.08)";
+      roundRect(box.x+16, box.y+62+i*26, box.w-32, 20, 10);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.65)";
+      ctx.font = "800 12px system-ui";
+      ctx.fillText(fields[i], box.x+26, box.y+76+i*26);
+    }
+
+    ctx.restore();
+  }
+
+  function drawRegisterValues(){
+    // CPU register strip
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.07)";
+    ctx.strokeStyle = "rgba(255,255,255,.16)";
+    ctx.lineWidth = 2;
+    roundRect(CPU.x+22, CPU.y+60, CPU.w-44, 48, 14);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,.85)";
+    ctx.font = "900 13px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`CPU: PC=${hex(state.cpu.PC)}  R1=${hex(state.cpu.R1)}  SP=${hex(state.cpu.SP)}`, CPU.x+34, CPU.y+84);
+    ctx.restore();
+
+    // PCB values (A)
+    drawPCBVals(PCB_A, state.A);
+    // PCB values (B)
+    drawPCBVals(PCB_B, state.B);
+  }
+
+  function drawPCBVals(box, procState){
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.font = "800 12px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+
+    const lines = [
+      `PC ${hex(procState.PC)}`,
+      `R1 ${hex(procState.R1)}`,
+      `SP ${hex(procState.SP)}`
+    ];
+
+    for(let i=0;i<3;i++){
+      ctx.fillText(lines[i], box.x + box.w - 22, box.y + 72 + i*26);
+    }
+    ctx.restore();
+  }
+
+  function drawReadyQueue(glowAlpha=0){
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.07)";
+    ctx.strokeStyle = "rgba(255,255,255,.16)";
+    ctx.lineWidth = 2;
+    roundRect(READY.x, READY.y, READY.w, READY.h, 18);
+    ctx.fill(); ctx.stroke();
+
+    if(glowAlpha > 0){
+      ctx.shadowColor = "rgba(255,194,71,.65)";
+      ctx.shadowBlur = 24;
+      ctx.strokeStyle = `rgba(255,194,71,${0.75*glowAlpha})`;
+      ctx.lineWidth = 6;
+      roundRect(READY.x-3, READY.y-3, READY.w+6, READY.h+6, 22);
+      ctx.stroke();
+      ctx.shadowColor = "transparent";
+    }
+
+    ctx.fillStyle = "rgba(255,255,255,.85)";
+    ctx.font = "900 16px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("READY QUEUE", READY.x + READY.w/2, READY.y + 28);
+    ctx.restore();
+
+    // slots
+    ctx.save();
+    ctx.globalAlpha = .9;
+    const slotY = READY.y + 64;
+    for(let i=0;i<4;i++){
+      ctx.fillStyle = "rgba(255,255,255,.08)";
+      roundRect(READY.x+18, slotY + i*32, READY.w-36, 22, 10);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawProcessBadges(activeProc, emphasis=1){
+    const aInCPU = activeProc === "A";
+    const bInCPU = activeProc === "B";
+
+    const cpuBay = { x: CPU.x+42, y: CPU.y+120, w: CPU.w-84, h: CPU.h-170 };
+
+    // CPU badges
+    label("Process A", cpuBay.x+20, cpuBay.y+20, 160, 44,
+      aInCPU ? "rgba(49,208,127,.97)" : "rgba(49,208,127,.30)",
+      "rgba(255,255,255,.20)",
+      "#0b1b33", true
+    );
+    label("Process B", cpuBay.x+20, cpuBay.y+78, 160, 44,
+      bInCPU ? "rgba(255,194,71,.97)" : "rgba(255,194,71,.28)",
+      "rgba(255,255,255,.20)",
+      "#0b1b33", true
+    );
+
+    // Ready queue tokens
+    ctx.save();
+    const slotX = READY.x+20;
+    const slotY = READY.y+64;
+
+    label("A", slotX, slotY, 46, 22,
+      aInCPU ? "rgba(49,208,127,.22)" : "rgba(49,208,127,.88)",
+      "rgba(255,255,255,.18)",
+      "#0b1b33", true
+    );
+    label("B", slotX, slotY+32, 46, 22,
+      bInCPU ? "rgba(255,194,71,.20)" : "rgba(255,194,71,.90)",
+      "rgba(255,255,255,.18)",
+      "#0b1b33", true
+    );
+    ctx.restore();
+  }
+
+  function drawTimerPulse(t){
+    const cx = CPU.x + CPU.w - 30;
+    const cy = CPU.y - 12;
+    ctx.save();
+    const pulse = 0.5 + 0.5*Math.sin(t* Math.PI*2);
+    const r = 16 + pulse*8;
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = "rgba(255,194,71,.45)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "rgba(255,194,71,.95)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 14, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(11,27,51,.8)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx, cy-6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx+6, cy);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPacket(px,py,labelTxt, alpha=1){
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(255,255,255,.10)";
+    ctx.strokeStyle = "rgba(255,255,255,.22)";
+    ctx.lineWidth = 2;
+    roundRect(px, py, packet.w, packet.h, 12);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,.82)";
+    ctx.font = "900 13px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(labelTxt, px + packet.w/2, py + packet.h/2);
+    ctx.restore();
+  }
+
+  // Timeline bar
+  function drawTimeline(stepName, t){
+    const x = 28, y = 96, w = canvas.width - 56, h = 28;
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.06)";
+    ctx.strokeStyle = "rgba(255,255,255,.14)";
+    ctx.lineWidth = 2;
+    roundRect(x,y,w,h,14);
+    ctx.fill(); ctx.stroke();
+
+    // segments
+    const segW = w / steps.length;
+    for(let i=0;i<steps.length;i++){
+      const sx = x + i*segW;
+      ctx.strokeStyle = "rgba(255,255,255,.10)";
+      ctx.beginPath();
+      ctx.moveTo(sx, y);
+      ctx.lineTo(sx, y+h);
+      ctx.stroke();
+    }
+
+    // progress fill for current step
+    const sx = x + stepIndex*segW;
+    ctx.fillStyle = "rgba(138,125,255,.45)";
+    roundRect(sx+3, y+3, (segW-6)*clamp(t,0,1), h-6, 12);
+    ctx.fill();
+
+    // labels
+    ctx.fillStyle = "rgba(255,255,255,.70)";
+    ctx.font = "700 11px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for(let i=0;i<steps.length;i++){
+      const cx = x + (i+0.5)*segW;
+      const short = steps[i].key.replace("_"," ");
+      ctx.fillText(short, cx, y + h/2);
+    }
+
+    ctx.restore();
+  }
+
+  function drawStatusText(text){
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.10)";
+    ctx.strokeStyle = "rgba(255,255,255,.18)";
+    ctx.lineWidth = 2;
+    roundRect(28, 540, canvas.width-56, 78, 18);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,.9)";
+    ctx.font = "900 18px system-ui";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Current Step:", 48, 578);
+
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.font = "750 18px system-ui";
+    ctx.fillText(text, 180, 578);
+
+    ctx.restore();
+  }
+
+  function drawPanels(glowCPU=0, glowA=0, glowB=0, glowReady=0){
+    chip(CPU.x, CPU.y, CPU.w, CPU.h, "CPU CORE", "rgba(43,156,255,.22)", glowCPU);
+
+    // CPU inner bay
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.06)";
+    roundRect(CPU.x+22, CPU.y+115, CPU.w-44, CPU.h-155, 18);
+    ctx.fill();
+    ctx.restore();
+
+    drawPCB(PCB_A, "PCB-A", "Stores A Context", glowA);
+    drawPCB(PCB_B, "PCB-B", "Stores B Context", glowB);
+    drawReadyQueue(glowReady);
+  }
+
+  function frame(dt){
+    const sp = Number(speed.value);
+    const stepDur = steps[stepIndex].dur;
+
+    if(running){
+      stepT += (dt/1000) * sp / stepDur;
+      if(stepT >= 1){
+        stepT = 0;
+        nextStep();
+      }
+    }
+
+    // While running, update fake registers for the active process
+    const current = steps[stepIndex].key;
+    if(running && (current === "A_RUN" || current === "B_RUN")){
+      // update at a moderate rate
+      if(Math.random() < 0.18){
+        const proc = (current === "A_RUN") ? "A" : "B";
+        tickFakeExecution(proc);
+        // CPU mirrors active proc
+        state.cpu = { ...state[proc] };
+      }
+    }
+
+    render();
+  }
+
+  function render(){
+    drawBackground();
+
+    const step = steps[stepIndex];
+    const stepName = step.name;
+    const t = ease(clamp(stepT,0,1));
+
+    // default
+    let active = "A";
+
+    // glow focus
+    let glowCPU = 0, glowA = 0, glowB = 0, glowReady = 0;
+
+    // movement packet values
+    let showPacket = false;
+    let packetLabel = "";
+    let packetX = 0, packetY = 0;
+
+    if(step.key === "A_RUN"){
+      active = "A";
+      glowCPU = 0.25;
+      // CPU mirrors A
+      state.cpu = { ...state.A };
+    }
+
+    if(step.key === "INT"){
+      active = "A";
+      glowCPU = 0.35;
+    }
+
+    if(step.key === "SAVE_A"){
+      active = "A";
+      glowA = 0.9;
+      glowCPU = 0.25;
+
+      // packet from CPU to PCB-A with register snapshot
+      showPacket = true;
+      packetLabel = `PC=${hex(state.cpu.PC)} R1=${hex(state.cpu.R1)} SP=${hex(state.cpu.SP)}`;
+      const fromX = CPU.x + CPU.w - 160;
+      const fromY = CPU.y + 230;
+      const toX = PCB_A.x + 20;
+      const toY = PCB_A.y + 78;
+      packetX = lerp(fromX, toX, t);
+      packetY = lerp(fromY, toY, t);
+
+      // when nearly complete, commit CPU->A PCB (conceptually: save to PCB)
+      if(running && t > 0.92){
+        state.A = { ...state.cpu };
+      }
+    }
+
+    if(step.key === "SEL_B"){
+      // halfway selection feels human
+      active = (t < 0.55) ? "A" : "B";
+      glowReady = 0.85;
+    }
+
+    if(step.key === "REST_B"){
+      active = "B";
+      glowB = 0.9;
+      glowCPU = 0.25;
+
+      // packet from PCB-B to CPU (restore)
+      showPacket = true;
+      packetLabel = `PC=${hex(state.B.PC)} R1=${hex(state.B.R1)} SP=${hex(state.B.SP)}`;
+      const fromX = PCB_B.x + 20;
+      const fromY = PCB_B.y + 78;
+      const toX = CPU.x + CPU.w - 160;
+      const toY = CPU.y + 280;
+      packetX = lerp(fromX, toX, t);
+      packetY = lerp(fromY, toY, t);
+
+      // when nearly complete, commit B->CPU
+      if(running && t > 0.92){
+        state.cpu = { ...state.B };
+      }
+    }
+
+    if(step.key === "B_RUN"){
+      active = "B";
+      glowCPU = 0.35;
+      // CPU mirrors B
+      state.cpu = { ...state.B };
+    }
+
+    drawPanels(glowCPU, glowA, glowB, glowReady);
+    drawRegisterValues();
+
+    // arrows and packet
+    if(step.key === "INT"){
+      drawTimerPulse(t);
+      ctx.save();
+      ctx.fillStyle="rgba(255,255,255,.75)";
+      ctx.font="750 13px system-ui";
+      ctx.fillText("Timer Interrupt", CPU.x + CPU.w - 140, CPU.y - 30);
+      ctx.restore();
+    }
+
+    if(step.key === "SAVE_A"){
+      arrow(CPU.x + CPU.w, CPU.y + 230, PCB_A.x, PCB_A.y + 90, "rgba(49,208,127,.65)", 4, 12);
+      ctx.save();
+      ctx.fillStyle = "rgba(49,208,127,.85)";
+      ctx.font = "900 13px system-ui";
+      ctx.fillText("SAVE", (CPU.x+CPU.w+PCB_A.x)/2 - 10, (CPU.y+230+PCB_A.y+90)/2 - 14);
+      ctx.restore();
+    }
+
+    if(step.key === "REST_B"){
+      arrow(PCB_B.x, PCB_B.y + 90, CPU.x + CPU.w, CPU.y + 280, "rgba(255,194,71,.70)", 4, 12);
+      ctx.save();
+      ctx.fillStyle = "rgba(255,194,71,.85)";
+      ctx.font = "900 13px system-ui";
+      ctx.fillText("RESTORE", (PCB_B.x+CPU.x+CPU.w)/2 - 26, (PCB_B.y+90+CPU.y+280)/2 - 14);
+      ctx.restore();
+    }
+
+    if(showPacket){
+      // widen packet for the longer label
+      const textW = ctx.measureText(packetLabel).width;
+      const w = Math.max(260, Math.min(520, textW + 44));
+      ctx.save();
+      // draw longer packet with same style
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = "rgba(255,255,255,.10)";
+      ctx.strokeStyle = "rgba(255,255,255,.22)";
+      ctx.lineWidth = 2;
+      roundRect(packetX, packetY, w, packet.h, 12);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,.82)";
+      ctx.font = "900 12px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(packetLabel, packetX + w/2, packetY + packet.h/2);
+      ctx.restore();
+    }
+
+    // process badges after arrows so they stay visible
+    drawProcessBadges(active);
+
+    // timeline + status
+    drawTimeline(stepName, t);
+    drawStatusText(stepName);
+
+    // Floating callouts (fade in)
+    const ca = 0.35 + 0.65*t;
+
+    if(step.key === "A_RUN"){
+      calloutBox("CPU is executing Process A instructions", CPU.x + 20, CPU.y + CPU.h + 18, 310, ca);
+      calloutPointer(CPU.x + 160, CPU.y + CPU.h + 18, CPU.x + 200, CPU.y + 210, ca);
+    }
+
+    if(step.key === "INT"){
+      calloutBox("Timer interrupt: OS kernel takes control", CPU.x + 20, CPU.y + CPU.h + 18, 340, ca);
+      calloutPointer(CPU.x + 240, CPU.y + CPU.h + 18, CPU.x + CPU.w - 35, CPU.y - 12, ca, "rgba(255,194,71,.55)");
+    }
+
+    if(step.key === "SAVE_A"){
+      calloutBox("Save A context into PCB-A (PC, registers, SP)", PCB_A.x - 40, PCB_A.y - 66, 380, ca);
+      calloutPointer(PCB_A.x + 150, PCB_A.y - 14, PCB_A.x + 120, PCB_A.y + 78, ca, "rgba(49,208,127,.55)");
+    }
+
+    if(step.key === "SEL_B"){
+      calloutBox("Scheduler selects next ready process: B", READY.x - 70, READY.y - 66, 330, ca);
+      calloutPointer(READY.x + 90, READY.y - 14, READY.x + 44, READY.y + 96, ca, "rgba(255,194,71,.55)");
+    }
+
+    if(step.key === "REST_B"){
+      calloutBox("Restore B context from PCB-B back into CPU", PCB_B.x - 55, PCB_B.y + PCB_B.h + 14, 380, ca);
+      calloutPointer(PCB_B.x + 170, PCB_B.y + PCB_B.h + 14, PCB_B.x + 140, PCB_B.y + 104, ca, "rgba(255,194,71,.55)");
+    }
+
+    if(step.key === "B_RUN"){
+      calloutBox("CPU is now executing Process B instructions", CPU.x + 20, CPU.y + CPU.h + 18, 320, ca);
+      calloutPointer(CPU.x + 160, CPU.y + CPU.h + 18, CPU.x + 200, CPU.y + 270, ca);
+    }
+  }
+
+  function loop(){
+    const t = now();
+    const dt = t - last;
+    last = t;
+    frame(dt);
+    requestAnimationFrame(loop);
+  }
+
+  reset();
+  loop();
+})();
+</script>
+</body>
+</html>
